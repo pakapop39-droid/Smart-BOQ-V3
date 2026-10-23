@@ -1,0 +1,74 @@
+import {randomUUID} from 'node:crypto';
+import Decimal from 'decimal.js';
+import {entities} from './schema.mjs';
+const D=Decimal.clone({precision:80});
+const fail=m=>{throw Error(m);};
+const decimal=(v,label,positive=false)=>{if(typeof v!=='string'||!/^\d+(\.\d{1,8})?$/.test(v)||positive&&new D(v).lte(0))fail('กรอก '+label+' เป็นตัวเลข'+(positive?'มากกว่า 0':''));return new D(v);};
+const product=(a,b)=>{const n=new D(a).mul(b);if(n.decimalPlaces()>6)fail('พื้นที่/จำนวนรวมมีทศนิยมเกิน 6 ตำแหน่ง กรุณาปรับอัตราหรือปริมาณ');return n.toFixed();};
+const children=['rate_template_groups','rate_template_cost_lines','rate_template_coverages'];
+export const rateMethods={
+ rateOwner(t,r){return t==='rate_templates'?r:this.get('rate_templates',r.template_id);},
+ validateRate(t,r,old){
+  const owner=this.rateOwner(t,r);if(owner.company_id!==this.company.id)fail('ต้นแบบอยู่คนละบริษัท');
+  if(old&&t!=='rate_templates'&&r.template_id!==old.template_id)fail('ไม่ย้ายรายการข้ามต้นแบบ');
+  if(t==='rate_templates'){if(!/^\d+$/.test(r.revision)||Number(r.revision)<1)fail('รุ่นต้องเป็นจำนวนเต็มมากกว่า 0');if(decimal(r.margin,'กำไร').gte(100))fail('กำไรต้องต่ำกว่า 100%');if(this.all('rate_templates').some(t=>t.id!==r.id&&t.company_id===r.company_id&&t.code===r.code&&t.status==='READY'&&t.unit_id!==r.unit_id))fail('เปลี่ยนหน่วยให้สร้างรหัสคลังใหม่');if(this.get('work_categories',r.category_id).company_id!==r.company_id)fail('หมวดงานคนละบริษัท');}
+  if(r.group_id&&this.get('rate_template_groups',r.group_id).template_id!==owner.id)fail('กลุ่มอยู่คนละต้นแบบ');
+  if(t==='rate_template_groups'){if(r.area!=='')decimal(r.area,'พื้นที่แผง');if(Number(r.lamSides??0)>Number(r.plySides??2))fail('ด้านปิดผิวต้องไม่เกินด้านบุไม้อัด');if(r.quantity!=='')decimal(r.quantity,'จำนวนชุด');}
+  if(t==='rate_template_cost_lines'){
+   if(this.get('cost_resources',r.resource_id).company_id!==owner.company_id)fail('วัสดุคนละบริษัท');
+   if(r.parent_id){const p=this.get(t,r.parent_id);if(p.template_id!==owner.id||p.group_id!==r.group_id||p.snapshot?.resourceKind!=='BUNDLE'||p.line_kind!=='CHARGEABLE')fail('ชุดแม่ไม่ถูกต้อง');}
+   if(r.numerator!=='')decimal(r.numerator,'อัตรา');decimal(r.denominator,'ตัวหาร',true);decimal(r.waste,'เผื่อเศษ');if(r.price!==''&&r.price!=null)decimal(r.price,'ราคา');
+   if(!r.snapshot||!r.line_kind)fail('ต้นทุนขาด snapshot');
+  }
+  if(t==='rate_template_coverages'){const l=this.get('rate_template_cost_lines',r.cost_line_id);if(l.template_id!==owner.id||l.line_kind!=='CHARGEABLE'||(l.group_id??null)!==(r.group_id||null))fail('ขอบเขตไม่ตรงบรรทัดต้นแบบ');if(this.get('cost_groups',r.cost_group_id).company_id!==owner.company_id)fail('ขอบเขตคนละบริษัท');}
+ },
+ saveRate(t,input){return this.tx(()=>{
+  const old=input.id?this.get(t,input.id):null;if(old&&old.version!==input.version)fail('รายการเปลี่ยนแล้ว กรุณาโหลดใหม่');
+  const allowed=[...Object.keys(entities[t].fields),...Object.keys(entities[t].refs??{}),'is_active'];
+  const r={...(old??{}),...Object.fromEntries(Object.entries(input).filter(([k])=>allowed.includes(k))),id:old?.id??randomUUID()};
+  for(const k of ['group_id','parent_id'])if(k in r&&!r[k])r[k]=null;for(const k of ['name','code'])if(typeof r[k]==='string')r[k]=r[k].normalize('NFC').trim();
+  const owner=t==='rate_templates'?old:this.rateOwner(t,r);if(owner&&owner.status!=='DRAFT')fail('รุ่นนี้พร้อมใช้แล้ว ให้สร้างรุ่นใหม่ก่อนแก้ไข');
+  if(t==='rate_templates'){r.status='DRAFT';r.is_active=r.is_active!==false;}
+  if(t==='rate_template_cost_lines'){
+   if(old?.line_kind!=='CHARGEABLE'&&old)fail('รายละเอียดรวมในชุดแก้ราคาแยกไม่ได้');
+   if(old&&(old.resource_id!==r.resource_id||(old.group_id||null)!==(r.group_id||null)||(old.parent_id||null)!==(r.parent_id||null)))fail('เปลี่ยนเจ้าของ/วัสดุเดิมไม่ได้ ให้เพิ่มบรรทัดใหม่');
+   const resource=this.get('cost_resources',r.resource_id);r.snapshot=old?.snapshot??this.snapshot(resource);r.price=r.price??r.snapshot.price??'';r.line_kind='CHARGEABLE';r.basis=r.quantity_source==='MANUAL'?'PER_UNIT':'TOTAL';r.variant=r.group_id?this.get('rate_template_groups',r.group_id).sourcing_method:null;
+  }
+  this.validate(t,r,old);const saved=this.put(t,r,r.id);
+  if(t==='rate_template_cost_lines'&&!old&&r.snapshot.resourceKind==='BUNDLE')this.expandRateBundle(saved);
+  if(t!=='rate_templates'){const root=this.get('rate_templates',r.template_id);this.put('rate_templates',root,root.id);}return saved;
+ });},
+ expandRateBundle(root){
+  const resource=this.get('cost_resources',root.resource_id),parts=this.all('resource_bundle_items').filter(x=>x.bundle_resource_id===resource.id&&x.is_active!==false);
+  const snapshot={resourceId:resource.id,version:resource.version,coveredScopes:(resource.covered_scopes??'').split(',').map(s=>s.trim()).filter(Boolean),items:parts.map(p=>({childCode:this.get('cost_resources',p.child_resource_id).code,inclusionStatus:p.inclusion_status,quantity:p.quantity||null,scopeKey:p.scope_key})),sourceReference:resource.notes??''};
+  this.put('rate_template_cost_lines',{...root,bundle_snapshot:snapshot},root.id);
+  for(const part of parts){const child=this.get('cost_resources',part.child_resource_id);this.put('rate_template_cost_lines',{...root,id:undefined,resource_id:child.id,parent_id:root.id,line_kind:part.inclusion_status==='INCLUDED'?'INCLUDED_REFERENCE':'EXCLUDED_REFERENCE',snapshot:this.snapshot(child),bundle_snapshot:null,price:null,numerator:'',quantity_source:'PARENT_BUNDLE_USAGE',quantity_per_parent:part.quantity||null,inclusion:part.inclusion_status,resolution:'PENDING',line_role:'OTHER'});}
+  for(const scope of snapshot.coveredScopes){let g=this.all('cost_groups').find(x=>x.company_id===this.company.id&&x.code===scope);if(!g)g=this.put('cost_groups',{company_id:this.company.id,code:scope,name:scope,is_active:true});this.put('rate_template_coverages',{template_id:root.template_id,cost_line_id:root.id,group_id:root.group_id||null,cost_group_id:g.id,scope_key:scope,mode:'BUNDLED'});}
+ },
+ importRate(input,preview=false){return this.tx(()=>{
+  const template=this.get('rate_templates',input.template_id);if(template.company_id!==this.company.id||!preview&&(template.status!=='READY'||template.is_active===false))fail('เลือกต้นแบบที่พร้อมใช้เท่านั้น');
+  if(input.template_version!==template.version)fail('ต้นแบบเปลี่ยนแล้ว กรุณาเปิดข้อมูลล่าสุด');
+  const work=this.get('work_items',input.work_item_id);this.context('work_items',work,input.project_version);decimal(input.quantity,'ปริมาณขาย',true);
+  const c=this.save('work_components',{work_item_id:work.id,category_id:template.category_id,unit_id:template.unit_id,name:template.name,quantity:input.quantity,margin:template.margin,is_active:true,project_version:input.project_version});
+  this.put('work_components',{...c,source_template_id:template.id,source_template_code:template.code,source_template_revision:template.revision,source_template_version:template.version,quotation_description:template.quotation_description??'',is_customized:false,imported_at:new Date().toISOString()},c.id);
+  const gm=new Map(),lm=new Map();
+  for(const g of this.all('rate_template_groups').filter(g=>g.template_id===template.id)){const x=this.put('component_groups',{...g,id:undefined,template_id:undefined,component_id:c.id,source_template_group_id:g.id,rate_area:g.area,rate_quantity:g.quantity,rate_basis:true,area:g.area?product(g.area,input.quantity):'',quantity:g.quantity?product(g.quantity,input.quantity):'',});gm.set(g.id,x.id);}
+  const source=this.all('rate_template_cost_lines').filter(l=>l.template_id===template.id);
+  for(const l of source)lm.set(l.id,randomUUID());
+  // Parents first; the referenced snapshot is the saved template revision, not today's catalog bundle.
+  for(const l of [...source.filter(l=>!l.parent_id),...source.filter(l=>l.parent_id)]){const pr=this.selectResource(work.project_id,this.get('cost_resources',l.resource_id));this.put('component_cost_lines',{...l,id:lm.get(l.id),template_id:undefined,resource_id:undefined,component_id:c.id,project_resource_id:pr.id,group_id:gm.get(l.group_id)||null,parent_id:lm.get(l.parent_id)||null,source_template_line_id:l.id,origin_excluded_id:lm.get(l.origin_excluded_id)||null,additional_confirmation:null,...(l.line_kind==='CHARGEABLE'&&l.snapshot.resourceKind==='BUNDLE'&&l.quantity_source==='MANUAL'?{basis:'TOTAL',rate_numerator:l.numerator,numerator:product(l.numerator,input.quantity)}:{})},lm.get(l.id));}
+  for(const v of this.all('rate_template_coverages').filter(v=>v.template_id===template.id))this.put('cost_line_coverages',{...v,id:undefined,template_id:undefined,cost_line_id:lm.get(v.cost_line_id),group_id:gm.get(v.group_id)||null,source_template_coverage_id:v.id});
+  for(const l of this.all('component_cost_lines').filter(l=>l.component_id===c.id&&l.additional_reason?.trim()&&l.additional_location?.trim()))if(preview)this.put('component_cost_lines',{...l,additional_confirmation:{at:new Date().toISOString(),actor:this.member.id,signature:this.extraSignature(l)}},l.id);
+  return this.get('work_components',c.id);
+ });},
+ previewRate(id){return this.tx(()=>{this.db.exec('SAVEPOINT rate_preview');try{
+  const t=this.get('rate_templates',id),p=this.put('projects',{company_id:this.company.id,member_id:this.member.id,code:'PREVIEW-'+randomUUID(),name:'ตรวจต้นแบบ',status:'DRAFT'}),a=this.put('areas',{project_id:p.id,code:'PREVIEW',name:'ตรวจ'}),w=this.put('work_items',{project_id:p.id,area_id:a.id,code:'PREVIEW',name:'ตรวจ'});
+  this.importRate({template_id:t.id,template_version:t.version,work_item_id:w.id,quantity:'1',project_version:p.version},true);const result=this.calculate(p.id);return result;
+ }finally{this.db.exec('ROLLBACK TO rate_preview; RELEASE rate_preview');}});},
+ resolveRateReference(input){return this.tx(()=>{const l=this.get('rate_template_cost_lines',input.id),t=this.get('rate_templates',l.template_id);if(t.status!=='DRAFT'||t.version!==input.template_version)fail('ต้นแบบเปลี่ยนแล้ว หรือพร้อมใช้แล้ว');if(l.line_kind!=='EXCLUDED_REFERENCE'||l.inclusion==='UNKNOWN')fail('ขอบเขตยังไม่ทราบ ต้องตรวจข้อมูลสินค้าชุดก่อน');if(input.decision==='NOT_REQUIRED')this.put('rate_template_cost_lines',{...l,resolution:'NOT_REQUIRED'},l.id);else if(input.decision==='ADD'){if(this.all('rate_template_cost_lines').some(x=>x.origin_excluded_id===l.id))fail('เพิ่มบรรทัดจริงแล้ว');this.put('rate_template_cost_lines',{...l,id:undefined,parent_id:null,line_kind:'CHARGEABLE',quantity_source:'MANUAL',basis:'PER_UNIT',numerator:'',price:l.snapshot.price??'',origin_excluded_id:l.id,resolution:null});this.put('rate_template_cost_lines',{...l,resolution:'ADDED'},l.id);}else fail('เลือกเพิ่มหรือไม่ต้องใช้');this.put('rate_templates',t,t.id);return {ok:true};});},
+ publishRate(id,version){return this.tx(()=>{const t=this.get('rate_templates',id);if(t.status!=='DRAFT'||t.version!==version)fail('ต้นแบบเปลี่ยนแล้ว หรือพร้อมใช้แล้ว');const checked=this.previewRate(id);if(!checked.result)fail(checked.errors.map(e=>e.error).join(' / ')||'ต้นทุนไม่ครบ');return this.put('rate_templates',{...t,status:'READY',unit_cost:checked.result.components[0].cost_total,unit_sale:checked.result.components[0].sale_per_unit},id);});},
+ retireRate(id,version){return this.tx(()=>{const t=this.get('rate_templates',id);if(t.version!==version||t.status!=='READY')fail('รายการเปลี่ยนแล้ว');return this.put('rate_templates',{...t,status:'RETIRED',is_active:false},id);});},
+ reviseRate(id,version){return this.tx(()=>{const old=this.get('rate_templates',id);if(old.version!==version)fail('ต้นแบบเปลี่ยนแล้ว');const revision=String(Math.max(...this.all('rate_templates').filter(t=>t.company_id===old.company_id&&t.code===old.code).map(t=>Number(t.revision)))+1);const root=this.put('rate_templates',{...old,id:undefined,revision,status:'DRAFT'}),gm=new Map(),lm=new Map();for(const g of this.all('rate_template_groups').filter(g=>g.template_id===id)){const n=this.put('rate_template_groups',{...g,id:undefined,template_id:root.id});gm.set(g.id,n.id);}const lines=this.all('rate_template_cost_lines').filter(l=>l.template_id===id);for(const l of lines)lm.set(l.id,randomUUID());for(const l of [...lines.filter(l=>!l.parent_id),...lines.filter(l=>l.parent_id)])this.put('rate_template_cost_lines',{...l,template_id:root.id,group_id:gm.get(l.group_id)||null,parent_id:lm.get(l.parent_id)||null,origin_excluded_id:lm.get(l.origin_excluded_id)||null},lm.get(l.id));for(const v of this.all('rate_template_coverages').filter(v=>v.template_id===id))this.put('rate_template_coverages',{...v,id:undefined,template_id:root.id,cost_line_id:lm.get(v.cost_line_id),group_id:gm.get(v.group_id)||null});return root;});},
+ removeRate(t,id,version){return this.tx(()=>{const r=this.get(t,id),owner=this.rateOwner(t,r);if(r.version!==version||owner.status!=='DRAFT')fail('ลบได้เฉพาะร่างรุ่นล่าสุด');if(t==='rate_template_cost_lines'){if(r.parent_id)fail('ลบที่บรรทัดชุดแม่');this.db.prepare('DELETE FROM rate_template_coverages WHERE cost_line_id=?').run(id);this.db.prepare('DELETE FROM rate_template_cost_lines WHERE parent_id=?').run(id);}this.db.prepare('DELETE FROM '+t+' WHERE id=?').run(id);if(t!=='rate_templates')this.put('rate_templates',owner,owner.id);return {ok:true};});},
+ syncRateGroups(r,old){if(!old||!r.source_template_id||r.quantity===old.quantity)return;for(const l of this.all('component_cost_lines').filter(l=>l.component_id===r.id&&l.rate_numerator!==undefined))this.put('component_cost_lines',{...l,numerator:product(l.rate_numerator,r.quantity)},l.id);for(const g of this.all('component_groups').filter(g=>g.component_id===r.id&&g.rate_basis)){this.put('component_groups',{...g,area:g.rate_area?product(g.rate_area,r.quantity):'',quantity:g.rate_quantity?product(g.rate_quantity,r.quantity):''},g.id);}},
+};

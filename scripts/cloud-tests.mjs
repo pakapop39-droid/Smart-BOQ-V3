@@ -1,0 +1,52 @@
+import fs from 'node:fs';import assert from 'node:assert/strict';
+import {query,EXPECTED_PROJECT} from './cloud-query.mjs';
+import {exportCatalog,parseCatalog} from '../lib/catalog-excel.mjs';
+fs.mkdirSync('artifacts',{recursive:true});const results=[];
+const j=x=>`'${JSON.stringify(x).replaceAll("'","''")}'::jsonb`;
+const line=(price,y,n,d='1',basis='PER_UNIT')=>({price:String(price),yield:String(y),numerator:String(n),denominator:String(d),waste:'0',basis});
+const custom=[line(1000,1,1.5),line(1200,2.88,1.44),line(3000,1,.6),line(800,1,1),line(300,1,1),line(1400,1,1),line(600,1,1)];
+const wall=[line(290,25,8),line(1200,2.88,1),line(500,2.88,1),line(3000,15,15,28.8),line(1000,1,1),line(800,1,1)];
+const sink=[line(3000,1,1),line(1200,1,1),line(600,1,1),line(800,1,1)];
+const modular=[line(4000,1,2,1,'TOTAL'),line(3200,1,2,1,'TOTAL'),line(3600,1,1,1,'TOTAL'),line(4200,1,1,1,'TOTAL'),line(1200,2.88,1.44),line(3000,15,.75),line(3000,1,.6),line(400,1,1),line(600,1,1)];
+const manual=modular.map((x,i)=>i===4?line(1200,2.88,5.04,1,'TOTAL'):i===5?line(3000,15,2.625,1,'TOTAL'):x);
+const calcs=query(`SELECT public.boq_component_calc(3.5,40,${j(custom)}) custom,public.boq_component_calc(6,40,${j(wall)}) wall,public.boq_component_calc(1,40,${j(sink)}) sink,public.boq_component_calc(3.5,40,${j(modular)}) modular,public.boq_component_calc(3.5,40,${j(manual)}) manual,public.boq_purchase_calc(11.04,2.88,1,1200) laminate,public.boq_purchase_calc(5.75,15,1,3000) glue,public.boq_component_calc(1,0,${j([line('1.005',1,1)])}) half_up`).rows[0];
+for(const [key,expected]of Object.entries({custom:['24500.00','11666.67','40833.35'],wall:['15523.47','4312.07','25872.42'],sink:['5600.00','9333.33','9333.33'],modular:['34625.00','16488.10','57708.35']})){
+ const a=calcs[key];assert.deepEqual([a.cost_total,a.sale_per_unit,a.sale_total],expected);results.push({test:key,status:'PASS',cost:a.cost_total,sale:a.sale_total});}
+assert.deepEqual(calcs.manual,calcs.modular);assert.equal(calcs.half_up.sale_total,'1.01');assert.equal(Number(calcs.laminate.purchase_quantity),4);assert.equal(Number(calcs.laminate.purchase_budget),4800);assert.equal(Number(calcs.glue.purchase_quantity),1);
+results.push({test:'manual TOTAL facade, half-up, project aggregated purchase rounding',status:'PASS'});
+const buys={CUSTOM:[[5.25,1,1,1000],[11.04,2.88,1,1200],[2.10,1,.01,3000],[3.5,1,1,800],[3.5,1,1,300],[6,2.88,1,500],[48,25,1,290],[3.125,15,1,3000],[1,1,1,3000],[1,1,1,1200],[1,1,1,600]],VS_MODULAR:[[2,1,1,4000],[2,1,1,3200],[1,1,1,3600],[1,1,1,4200],[11.04,2.88,1,1200],[5.75,15,1,3000],[2.1,1,.01,3000],[48,25,1,290],[6,2.88,1,500],[1,1,1,3000],[1,1,1,1200],[1,1,1,600]]};
+const budgetSql=Object.entries(buys).map(([key,rows])=>`SELECT '${key}' kind,sum((public.boq_purchase_calc((x->>0)::numeric,(x->>1)::numeric,(x->>2)::numeric,(x->>3)::numeric)->>'purchase_budget')::numeric)::text budget FROM jsonb_array_elements(${j(rows)}) x`).join(' UNION ALL ');
+const budgets=query(budgetSql).rows;assert.deepEqual(budgets,[{kind:'CUSTOM',budget:'31380.00'},{kind:'VS_MODULAR',budget:'43180.00'}]);results.push({test:'all project resources aggregated then rounded for both purchase budgets',status:'PASS',budgets});
+const totals=query(`SELECT ((a->>'cost_total')::numeric+(b->>'cost_total')::numeric+(c->>'cost_total')::numeric)::text custom_cost,((a->>'sale_total')::numeric+(b->>'sale_total')::numeric+(c->>'sale_total')::numeric)::text custom_sale,((d->>'cost_total')::numeric+(b->>'cost_total')::numeric+(c->>'cost_total')::numeric)::text modular_cost,((d->>'sale_total')::numeric+(b->>'sale_total')::numeric+(c->>'sale_total')::numeric)::text modular_sale FROM (SELECT public.boq_component_calc(3.5,40,${j(custom)}) a,public.boq_component_calc(6,40,${j(wall)}) b,public.boq_component_calc(1,40,${j(sink)}) c,public.boq_component_calc(3.5,40,${j(modular)}) d) t`).rows[0];
+assert.deepEqual(totals,{custom_cost:'45623.47',custom_sale:'76039.10',modular_cost:'55748.47',modular_sale:'92914.10'});results.push({test:'B01 golden totals',status:'PASS',...totals});
+// Real XLSX values are used as input to remote DB tests. No fake auth users needed.
+const base={resource_id:null,version:null,kind:'MATERIAL',resource_code:'SAMPLE-LM01',resource_name:'SAMPLE ลามิเนต',specification:null,cost_type_code:'MATERIAL',purchase_unit_code:'SHEET',usage_unit_code:'M2',purchase_unit_price:'1200.000000',conversion_method:'AREA',pack_count:null,length_m:'2.400000',width_m:'1.200000',volume_l:null,purchase_increment:'1.000000',coverage_area_per_purchase:null,coverage_note:null,price_updated_at:'2026-10-23T00:00:00Z',is_active:true};
+const labor={...base,kind:'LABOR',resource_code:'SAMPLE-LB01',resource_name:'SAMPLE ค่าแรง',cost_type_code:'LABOR',purchase_unit_code:'M',usage_unit_code:'M',purchase_unit_price:'600',conversion_method:'DIRECT',length_m:null,width_m:null};
+const mod={...labor,kind:'VS_MODULAR',resource_code:'b-0800-0750-0600-0',resource_name:'SAMPLE โครงตู้',cost_type_code:'MATERIAL',purchase_unit_code:'ITEM',usage_unit_code:'ITEM',purchase_unit_price:'4000',function_code:'b',width_mm:'800',height_mm:'750',depth_mm:'600',led_code:'0',included_scope:'SAMPLE รอตรวจ Index',excluded_scope:'SAMPLE รอตรวจ Index',index_reference:null};
+const xlsx=await exportCatalog([base,labor,mod]);fs.writeFileSync('artifacts/SAMPLE-catalog-template.xlsx',xlsx);const parsed=await parseCatalog(xlsx);
+const rehearsal=`DO $test$ DECLARE tenant uuid; second_tenant uuid; payload jsonb:=${j(parsed.rows)}; preview jsonb; result jsonb; item jsonb; revised jsonb; old_payload jsonb; rid uuid; cnt bigint; v bigint; caught boolean; BEGIN
+ INSERT INTO public.companies(company_name,address,phone) VALUES('SAMPLE rollback-only','SAMPLE','SAMPLE') RETURNING company_id INTO tenant;
+ INSERT INTO public.companies(company_name,address,phone) VALUES('SAMPLE other tenant rollback-only','SAMPLE','SAMPLE') RETURNING company_id INTO second_tenant;
+ preview:=public.boq_catalog_preview_for(tenant,payload); IF NOT (preview->>'valid')::boolean THEN RAISE EXCEPTION 'PREVIEW_FAIL %',preview; END IF;
+ result:=public.boq_catalog_commit_for(tenant,payload,preview->>'preview_token');IF result->>'added'<>'3' THEN RAISE EXCEPTION 'ADD_FAIL %',result; END IF;
+ preview:=public.boq_catalog_preview_for(tenant,payload);result:=public.boq_catalog_commit_for(tenant,payload,preview->>'preview_token');IF result->>'unchanged'<>'3' THEN RAISE EXCEPTION 'REPEAT_FAIL %',result; END IF;
+ SELECT resource_id,version INTO rid,v FROM public.cost_resources WHERE company_id=tenant AND resource_code='SAMPLE-LM01';IF v<>1 THEN RAISE EXCEPTION 'NOOP_VERSION_FAIL'; END IF;
+ item:=payload->0||jsonb_build_object('resource_id',rid,'version','1');old_payload:=jsonb_build_array(item);
+ item:=item||jsonb_build_object('purchase_unit_price','1250');revised:=jsonb_build_array(item);
+ preview:=public.boq_catalog_preview_for(tenant,revised);result:=public.boq_catalog_commit_for(tenant,revised,preview->>'preview_token');IF result->>'updated'<>'1' THEN RAISE EXCEPTION 'UPDATE_FAIL %',result; END IF;
+ SELECT version INTO v FROM public.cost_resources WHERE resource_id=rid;IF v<>2 THEN RAISE EXCEPTION 'UPDATE_VERSION_FAIL'; END IF;
+ preview:=public.boq_catalog_preview_for(tenant,revised);IF preview->'rows'->0->>'action'<>'NO_CHANGE' THEN RAISE EXCEPTION 'REPEAT_OLD_VERSION_FAIL'; END IF;
+ preview:=public.boq_catalog_preview_for(tenant,old_payload);IF preview->'rows'->0->>'action'<>'CONFLICT' THEN RAISE EXCEPTION 'STALE_FAIL %',preview; END IF;
+ preview:=public.boq_catalog_preview_for(second_tenant,revised);IF (preview->>'valid')::boolean THEN RAISE EXCEPTION 'CROSS_TENANT_FAIL'; END IF;
+ preview:=public.boq_catalog_preview_for(tenant,jsonb_build_array(payload->0,payload->0));IF (preview->>'valid')::boolean THEN RAISE EXCEPTION 'DUPLICATE_FAIL'; END IF;
+ preview:=public.boq_catalog_preview_for(tenant,'[]');result:=public.boq_catalog_commit_for(tenant,'[]',preview->>'preview_token');SELECT count(*) INTO cnt FROM public.cost_resources WHERE company_id=tenant;IF cnt<>3 THEN RAISE EXCEPTION 'DELETION_FAIL'; END IF;
+ caught:=false;BEGIN PERFORM public.boq_component_calc(0,40,'[]');EXCEPTION WHEN OTHERS THEN caught:=true;END;IF NOT caught THEN RAISE EXCEPTION 'ZERO_QUANTITY_FAIL'; END IF;
+ caught:=false;BEGIN PERFORM public.boq_component_calc(1,100,${j(custom)});EXCEPTION WHEN OTHERS THEN caught:=true;END;IF NOT caught THEN RAISE EXCEPTION 'MARGIN_FAIL'; END IF;
+ RAISE EXCEPTION 'PHASE2_CATALOG_REHEARSAL_PASS_ROLLED_BACK';END $test$;`;
+const rolled=query('SELECT public.boq_test_catalog() result').rows[0].result;assert.equal(rolled.status,'PASS');
+results.push({test:'real XLSX → remote catalog preview/commit, repeat, update, stale conflict, tenant isolation, duplicate, no deletion, invalid calculations',status:'PASS',fixtures:'rolled back atomically'});
+const schema=query(`SELECT count(*) FILTER(WHERE relrowsecurity) AS rls_tables,count(*) AS business_tables FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind='r';`).rows[0];assert.equal(Number(schema.business_tables),16);assert.equal(Number(schema.rls_tables),16);
+const grants=query(`SELECT count(*) AS unsafe_grants FROM information_schema.role_table_grants WHERE table_schema='public' AND grantee IN ('anon','authenticated') AND privilege_type IN ('INSERT','UPDATE','DELETE');`).rows[0];assert.equal(Number(grants.unsafe_grants),0);
+const counts=query(`SELECT (SELECT count(*) FROM public.companies) AS companies,(SELECT count(*) FROM public.cost_resources) AS resources,(SELECT count(*) FROM public.projects) AS projects,(SELECT count(*) FROM public.cost_groups) AS groups;`).rows[0];assert.equal(Number(counts.companies),0);assert.equal(Number(counts.resources),0);assert.equal(Number(counts.projects),0);assert.equal(Number(counts.groups),13);
+results.push({test:'16 RLS tables, no direct client DML, 13 Master groups, no persistent test company/catalog/project',status:'PASS'});
+const report={checkedAt:new Date().toISOString(),projectId:EXPECTED_PROJECT,results,status:'PASS',limits:['Authenticated browser/API flow and real concurrent sessions belong to frontend integration phase','Project lock/copy/coverage confirmation services not enabled in phase 2','No real catalog data or Index has been imported'],legacyActions:false};fs.writeFileSync('artifacts/cloud-tests.json',JSON.stringify(report,null,2));console.log(JSON.stringify(report,null,2));

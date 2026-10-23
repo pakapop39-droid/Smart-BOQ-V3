@@ -1,0 +1,5 @@
+import {defineConfig} from 'vite';
+import {fileURLToPath} from 'node:url';
+import {localApi} from './local/api.mjs';
+const local=()=>({name:'smart-boq-local-only',configureServer(server){const api=localApi(fileURLToPath(new URL('./data/smart-boq-local.sqlite',import.meta.url)));server.middlewares.use('/api/local',api.handler);server.httpServer?.once('close',()=>api.store.close());},configurePreviewServer(server){const api=localApi(fileURLToPath(new URL('./data/smart-boq-local.sqlite',import.meta.url)));server.middlewares.use('/api/local',api.handler);server.httpServer?.once('close',()=>api.store.close());}});
+export default defineConfig({plugins:[local()],build:{outDir:'dist',chunkSizeWarningLimit:1200,rollupOptions:{input:{app:fileURLToPath(new URL('./index.html',import.meta.url)),trial:fileURLToPath(new URL('./trial.html',import.meta.url))}}},server:{host:'127.0.0.1',port:5177,strictPort:true,hmr:false,watch:{ignored:['**/data/**','**/artifacts/**']},fs:{deny:['**/.env*','**/.insforge/**','**/data/**']}}});

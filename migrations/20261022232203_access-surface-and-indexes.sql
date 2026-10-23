@@ -1,0 +1,30 @@
+-- RLS helpers need no owner escalation except the membership lookup itself.
+DROP POLICY own_read ON public.work_components;
+CREATE POLICY own_read ON public.work_components FOR SELECT TO authenticated USING (EXISTS(SELECT 1 FROM public.work_items w WHERE w.work_item_id=work_components.work_item_id AND public.boq_project_company(w.project_id)=public.boq_company()));
+ALTER FUNCTION public.boq_project_company(uuid) SECURITY INVOKER;
+ALTER FUNCTION public.boq_component_project(uuid) SECURITY INVOKER;
+ALTER FUNCTION public.boq_line_project(uuid) SECURITY INVOKER;
+ALTER FUNCTION public.boq_catalog_export() SECURITY INVOKER;
+ALTER FUNCTION public.boq_project_calculate(uuid) SECURITY INVOKER;
+REVOKE CREATE ON SCHEMA public FROM PUBLIC,anon,authenticated;
+
+CREATE INDEX areas_parent_fk ON public.areas(project_id,parent_area_id);
+CREATE INDEX work_items_area_fk ON public.work_items(project_id,area_id);
+CREATE INDEX projects_preparer_fk ON public.projects(company_id,prepared_by_membership_id);
+CREATE INDEX components_work_fk ON public.work_components(work_item_id);
+CREATE INDEX components_category_fk ON public.work_components(category_id);
+CREATE INDEX components_sale_unit_fk ON public.work_components(selling_unit_id);
+CREATE INDEX resources_type_fk ON public.cost_resources(cost_type_id);
+CREATE INDEX resources_purchase_unit_fk ON public.cost_resources(purchase_unit_id);
+CREATE INDEX resources_usage_unit_fk ON public.cost_resources(usage_unit_id);
+CREATE INDEX project_resources_resource_fk ON public.project_resources(resource_id);
+CREATE INDEX project_resources_type_fk ON public.project_resources(cost_type_id);
+CREATE INDEX project_resources_purchase_unit_fk ON public.project_resources(purchase_unit_id);
+CREATE INDEX project_resources_usage_unit_fk ON public.project_resources(usage_unit_id);
+CREATE INDEX lines_component_fk ON public.component_cost_lines(component_id);
+CREATE INDEX lines_resource_fk ON public.component_cost_lines(project_resource_id);
+CREATE INDEX lines_type_fk ON public.component_cost_lines(cost_type_id);
+CREATE INDEX lines_purchase_unit_fk ON public.component_cost_lines(purchase_unit_id);
+CREATE INDEX lines_usage_unit_fk ON public.component_cost_lines(usage_unit_id);
+CREATE INDEX lines_group_fk ON public.component_cost_lines(cost_group_id);
+CREATE INDEX coverage_scope ON public.cost_line_coverages(cost_group_id,scope_key,cost_line_id);
