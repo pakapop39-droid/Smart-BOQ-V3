@@ -27,3 +27,10 @@ outputs/
 coverage/
 web/public-config.mjs
 insforge.toml
+credentials/
+secrets/
+*.p12
+*.pfx
+*.jks
+*.dump
+*.sql.gz

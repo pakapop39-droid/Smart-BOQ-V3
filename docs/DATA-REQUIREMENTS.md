@@ -248,3 +248,11 @@ rate_templates ต้องมีรหัส/ชื่อ/หน่วย/ห�
 ## งานที่ต้องตรวจเพิ่มก่อนอ้างว่าครบ
 
 ชื่อบริษัท/ที่อยู่/โทรศัพท์/ผู้จัดทำและความสัมพันธ์บริษัท, ข้อมูลผู้ว่าจ้าง, unit dimensions/allowed_for_sale, ราคาและวันที่ยืนยัน/สถานะ VERIFIED, ขอบเขต CONFIRMED/lock, สเปก Modular ฟังก์ชัน LED และ Index, version ของแม่/ลูก/Excel, audit/sort_order และการส่งออกครบถ้วน ต้องระบุ alias/implemented/pending ตามแต่ละช่อง ห้ามลบข้อกำหนดเหล่านี้เพราะยังไม่มีในฟอร์ม local
+
+## ทะเบียนแท็กที่อนุมัติและสร้างเพิ่มในขั้นที่ 3
+
+resource_tags: UUID, company_id, name/normalized_name NFC+trim, sort_order, version และเวลา; unique บริษัท/ชื่อมาตรฐาน
+
+resource_tag_links: UUID, company_id, tag_id, resource_id, version และเวลา; unique tag/resource และ FK บริษัทเดียวกัน
+
+undo_journal ใน companies.data เป็น metadata ไม่เป็นตารางธุรกิจใหม่ ไม่เปิดฟอร์มให้แก้ ห้ามคืนบริษัททั้งแถวทับลำดับรหัสล่าสุด

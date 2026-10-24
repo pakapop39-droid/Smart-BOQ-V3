@@ -1,5 +1,6 @@
 import {LocalStore,LocalError} from './store.mjs';
 import {catalogExport,catalogPreview,catalogCommit} from './catalog.mjs';
+import {previewCatalogDraft} from './catalog-draft.mjs';
 export function localApi(path){
  const store=new LocalStore(path);
  async function handler(req,res,next){
@@ -9,20 +10,40 @@ export function localApi(path){
    const url=new URL(req.url,'http://127.0.0.1'),route=url.pathname.replace(/^\/api\/local/,'')||'/';
    if(req.method==='GET'&&route==='/state')return send(200,store.state());
    if(req.method==='GET'&&route==='/calculate')return send(200,store.calculate(url.searchParams.get('project')));
-   if(req.method==='GET'&&route==='/backup')return send(200,{format:'SMART_BOQ_LOCAL_22_V1',exported_at:new Date().toISOString(),...store.state()});
+   if(req.method==='GET'&&route==='/backup')return send(200,{format:'SMART_BOQ_LOCAL_24_V1',exported_at:new Date().toISOString(),...store.state()});
    if(req.method==='GET'&&route==='/catalog-export')return send(200,catalogExport(store));
-   if(!['POST','DELETE'].includes(req.method))return send(404,{error:'ไม่พบคำสั่งในเครื่อง'});
+   if(req.method==='GET'&&route==='/tags/migration-preview')return send(200,store.tagsMigrationPreview());
+   if(req.method==='GET'&&route==='/tags')return send(200,{tags:store.all('resource_tags'),links:store.all('resource_tag_links')});
+   if(req.method==='GET'&&route==='/undo/latest')return send(200,store.undoLatest({scope:url.searchParams.get('scope')??'catalog',component_id:url.searchParams.get('component_id')}));
+   if(!['POST','DELETE','PATCH'].includes(req.method))return send(404,{error:'ไม่พบคำสั่งในเครื่อง'});
    const chunks=[];let size=0;for await(const chunk of req){chunks.push(chunk);size+=chunk.length;if(size>20*1024*1024)throw new LocalError('ข้อมูลเกินขนาด 20 MB',413);}const raw=Buffer.concat(chunks).toString('utf8');let body;try{body=JSON.parse(raw||'{}');}catch{throw new LocalError('รูปแบบ JSON ไม่ถูกต้อง');}
+   if(route==='/tags/migrate'&&req.method==='POST')return send(200,store.migrateTags(body));
+   if(route==='/tags/merge'&&req.method==='POST')return send(200,store.mergeTags(body));
+   if(route==='/tags/bulk'&&req.method==='POST')return send(200,store.bulkTags(body));
+   if(route==='/tags'&&req.method==='POST')return send(200,store.createTag(body));
+   const tagMatch=route.match(/^\/tags\/([^/]+)$/);
+   if(tagMatch&&req.method==='PATCH')return send(200,store.renameTag(tagMatch[1],body));
+   if(tagMatch&&req.method==='DELETE')return send(200,store.deleteTag(tagMatch[1],body));
+   if(route==='/cost-lines/bulk-add'&&req.method==='POST')return send(200,store.bulkAddCostLines(body));
+   if(route==='/cost-lines/bulk-delete'&&req.method==='POST')return send(200,store.bulkDeleteCostLines(body));
+   const undoMatch=route.match(/^\/undo\/([^/]+)$/);if(undoMatch&&req.method==='POST')return send(200,store.undoCommand(undoMatch[1],body));
+   if(route==='/restore-preview'&&req.method==='POST')return send(200,store.restorePreview(body.backup??body));
    if(route==='/rate-reference'&&req.method==='POST')return send(200,store.resolveRateReference(body));
    if(route==='/rate-preview'&&req.method==='POST')return send(200,store.previewRate(body.id));
+   if(route==='/rate-draft-preview'&&req.method==='POST')return send(200,store.previewRateDraft(body));
+   if(route==='/rate-costs/delete'&&req.method==='POST')return send(200,store.deleteRateCosts(body));
+   if(route==='/rate-costs/undo'&&req.method==='POST')return send(200,store.undoRateCosts(body));
    if(route==='/rate-publish'&&req.method==='POST')return send(200,store.publishRate(body.id,body.version));
    if(route==='/rate-retire'&&req.method==='POST')return send(200,store.retireRate(body.id,body.version));
    if(route==='/rate-revise'&&req.method==='POST')return send(200,store.reviseRate(body.id,body.version));
+   if(route==='/rate-clone'&&req.method==='POST')return send(200,store.cloneRate(body));
+   if(route==='/rate-capture'&&req.method==='POST')return send(200,store.captureRate(body));
    if(route==='/rate-import'&&req.method==='POST')return send(200,store.importRate(body));
-   if(route==='/restore'&&req.method==='POST')return send(200,store.restore(body));
+   if(route==='/restore'&&req.method==='POST')return send(200,store.restoreConfirmed(body));
    if(route==='/sample'&&req.method==='POST')return send(200,store.sampleProject());
    if(route==='/catalog-preview'&&req.method==='POST')return send(200,catalogPreview(store,body.rows));
    if(route==='/catalog-commit'&&req.method==='POST')return send(200,catalogCommit(store,body.rows));
+   if(route==='/catalog-draft-preview'&&req.method==='POST')return send(200,previewCatalogDraft(store,body));
    if(route==='/select-resource'&&req.method==='POST')return send(200,store.tx(()=>{store.context('project_resources',{project_id:body.project_id},body.project_version);const pr=store.selectResource(body.project_id,store.get('cost_resources',body.resource_id));const p=store.get('projects',body.project_id);store.put('projects',p,p.id);return pr;}));
    if(route==='/resolve-reference'&&req.method==='POST')return send(200,store.resolveReference(body.id,body.decision,body.project_version));
    const match=route.match(/^\/records\/([a-z_]+)(?:\/([^/]+))?$/);

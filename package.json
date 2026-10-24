@@ -1,7 +1,7 @@
 {
   "name": "smart-boq-new",
   "version": "1.0.0",
-  "description": "Smart BOQ V3 local SQLite trial, 22 business tables",
+  "description": "Smart BOQ V3 local SQLite app, 24 business tables",
   "main": "index.js",
   "directories": {
     "doc": "docs"
@@ -10,7 +10,8 @@
     "test": "node --test tests/*.test.mjs",
     "test:cloud": "node scripts/cloud-tests.mjs",
     "build": "vite build",
-    "dev": "vite --host 127.0.0.1"
+    "dev": "vite --host 127.0.0.1",
+    "dev:cabinet-a": "node scripts/cabinet-a-trial.mjs"
   },
   "keywords": [],
   "author": "",

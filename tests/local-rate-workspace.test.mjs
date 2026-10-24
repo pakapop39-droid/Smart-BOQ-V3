@@ -1,0 +1,40 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {LocalStore} from '../local/store.mjs';
+import {filterRateLibrary} from '../web/local-rate-workspace.mjs';
+import {isCostLineTable,selectedCostActive} from '../web/cost-line-policy.mjs';
+
+test('cost line forms have no activation control; catalog controls retain their meaning',()=>{
+ assert.equal(isCostLineTable('rate_template_cost_lines'),true);
+ assert.equal(isCostLineTable('component_cost_lines'),true);
+ assert.equal(selectedCostActive('rate_template_cost_lines',{elements:{}}),true);
+ assert.equal(selectedCostActive('component_cost_lines',{elements:{is_active:{checked:false}}}),true);
+ assert.equal(selectedCostActive('cost_resources',{elements:{is_active:{checked:false}}}),false);
+});
+
+test('saved and restored cost rows participate; deleting legacy inactive rows preserves catalog resources',t=>{
+ const {s,r,add}=setup(t),line=add('GL01',{is_active:false});
+ assert.equal(line.is_active,true);
+ const legacy=s.put('rate_template_cost_lines',{...line,is_active:false},line.id);
+ const catalog=s.all('cost_resources');
+ s.deleteRateCosts({template_id:r.id,template_version:s.get('rate_templates',r.id).version,lines:[{id:legacy.id,version:legacy.version}]});
+ assert.equal(s.all('rate_template_cost_lines').some(l=>l.id===legacy.id),false);
+ assert.deepEqual(s.all('cost_resources'),catalog);
+ s.undoRateCosts({template_id:r.id,template_version:s.get('rate_templates',r.id).version});
+ const restored=s.get('rate_template_cost_lines',legacy.id);
+ for(const field of ['id','numerator','denominator','snapshot'])assert.deepEqual(restored[field],legacy[field]);
+ assert.equal(restored.is_active,true);
+ assert.equal(s.previewRate(r.id).result.components[0].cost_total,'200.00');
+ const projectLine=s.all('component_cost_lines').find(l=>l.line_kind==='CHARGEABLE'&&!l.parent_id);
+ const saved=s.save('component_cost_lines',{...projectLine,is_active:false,project_version:s.get('projects',s.projectOf('work_components',s.get('work_components',projectLine.component_id))).version});
+ assert.equal(saved.is_active,true);
+});
+
+function setup(t){const s=new LocalStore(':memory:');t.after(()=>s.close());s.sampleProject();const r=s.save('rate_templates',{company_id:s.company.id,category_id:s.all('work_categories')[0].id,unit_id:s.all('units').find(u=>u.name==='ตร.ม.').id,name:'ผนัง SAMPLE',margin:'40',is_active:true});const add=(code,extra={})=>s.save('rate_template_cost_lines',{template_id:r.id,resource_id:s.all('cost_resources').find(r=>r.code===code).id,numerator:'1',denominator:'1',waste:'0',line_role:'OTHER',quantity_source:'MANUAL',...extra});return {s,r,add};}
+test('rate filters intersect search and status without mutating records',()=>{const rates=[{code:'RT001',name:'ผนัง',status:'DRAFT'},{code:'RT002',name:'ผนังพร้อม',status:'READY'},{code:'RT003',name:'ตู้',status:'READY'}],before=JSON.stringify(rates);assert.deepEqual(filterRateLibrary(rates,' ผนัง ','READY').map(x=>x.code),['RT002']);assert.equal(filterRateLibrary(rates,'rt001').length,1);assert.equal(JSON.stringify(rates),before);});
+test('unsaved draft preview uses frozen purchase conversion and margin with no persistent writes',t=>{const {s,r,add}=setup(t),l=add('WD01',{numerator:'8'}),before=s.state();const preview=s.previewRateDraft({table:'rate_template_cost_lines',data:{...l,numerator:'10'}});assert.equal(preview.result.components[0].cost_total,'116.00');assert.equal(preview.result.components[0].sale_per_unit,'193.33');assert.deepEqual(s.state(),before);const a=s.previewRateDraft({table:'rate_templates',data:{...s.get('rate_templates',r.id),margin:'50'}});assert.equal(a.result.components[0].sale_per_unit,'185.60');assert.deepEqual(s.state(),before);});
+test('adding an unsaved line previews the entire template and leaves no new rows',t=>{const {s,r,add}=setup(t);add('WD01',{numerator:'8'});const before=s.state(),resource=s.all('cost_resources').find(x=>x.code==='LM01');const p=s.previewRateDraft({table:'rate_template_cost_lines',data:{template_id:r.id,resource_id:resource.id,numerator:'1',denominator:'1',waste:'0',price:'1200',line_role:'OTHER',quantity_source:'MANUAL',is_active:true}});assert.equal(p.result.components[0].cost_total,'509.47');assert.equal(p.result.components[0].sale_per_unit,'849.11');assert.deepEqual(s.state(),before);});
+test('incomplete, invalid, stale and wrong-owner drafts never persist or report false totals',t=>{const {s,r,add}=setup(t),l=add('WD01'),before=s.state();assert.throws(()=>s.previewRateDraft({table:'rate_template_cost_lines',data:{...l,denominator:'0'}}));assert.deepEqual(s.state(),before);const p=s.previewRateDraft({table:'rate_template_cost_lines',data:{...l,numerator:''}});assert.equal(p.result,null);assert.deepEqual(s.state(),before);assert.throws(()=>s.previewRateDraft({table:'rate_template_cost_lines',data:{...l,version:0}}));assert.throws(()=>s.previewRateDraft({table:'companies',data:{}}));assert.deepEqual(s.state(),before);});
+test('rate deletion is atomic, undoes edited values and totals and leaves imported project snapshots unchanged',t=>{const {s,r,add}=setup(t),a=add('WD01',{numerator:'8'}),b=add('LM01',{numerator:'3'});const base=s.previewRate(r.id).result;const ready=s.publishRate(r.id,s.get('rate_templates',r.id).version),work=s.all('work_items')[0];s.importRate({template_id:r.id,template_version:ready.version,work_item_id:work.id,project_version:s.get('projects',work.project_id).version,quantity:'2'});const projects=s.calculate(work.project_id),draft=s.reviseRate(r.id,ready.version),ls=s.all('rate_template_cost_lines').filter(l=>l.template_id===draft.id);const before=s.state();assert.throws(()=>s.deleteRateCosts({template_id:draft.id,template_version:draft.version,lines:[{id:ls[0].id,version:ls[0].version},{id:b.id,version:b.version}]}));assert.deepEqual(s.state(),before);s.deleteRateCosts({template_id:draft.id,template_version:draft.version,lines:ls.map(l=>({id:l.id,version:l.version}))});assert.equal(s.previewRate(draft.id).result,null);s.undoRateCosts({template_id:draft.id,template_version:s.get('rate_templates',draft.id).version});assert.equal(s.previewRate(draft.id).result.cost_total,base.cost_total);const restored=s.all('rate_template_cost_lines').filter(l=>l.template_id===draft.id);assert.deepEqual(restored.map(l=>l.numerator),ls.map(l=>l.numerator));assert.deepEqual(s.calculate(work.project_id),projects);assert.throws(()=>s.undoRateCosts({template_id:draft.id,template_version:s.get('rate_templates',draft.id).version}));});
+test('undo survives complete backup restore but refuses to overwrite a later edit',t=>{const {s,r,add}=setup(t),l=add('WD01',{numerator:'8'});s.deleteRateCosts({template_id:r.id,template_version:s.get('rate_templates',r.id).version,lines:[{id:l.id,version:l.version}]});const copy=new LocalStore(':memory:');t.after(()=>copy.close());copy.restore({format:'SMART_BOQ_LOCAL_24_V1',...s.state()});copy.undoRateCosts({template_id:r.id,template_version:copy.get('rate_templates',r.id).version});assert.equal(copy.get('rate_template_cost_lines',l.id).numerator,'8');const current=s.get('rate_templates',r.id);s.save('rate_templates',{...current,name:'แก้หลังลบ'});const before=s.state();assert.throws(()=>s.undoRateCosts({template_id:r.id,template_version:s.get('rate_templates',r.id).version}),/ข้อมูลเปลี่ยน/);assert.deepEqual(s.state(),before);});
+test('bundle delete and undo retain reference children and coverages without double charging',t=>{const {s,r,add}=setup(t),root=add('DOOR-KIT-SAMPLE');const before=s.previewRate(r.id).result;assert.ok(s.all('rate_template_cost_lines').some(l=>l.parent_id===root.id));s.deleteRateCosts({template_id:r.id,template_version:s.get('rate_templates',r.id).version,lines:[{id:root.id,version:s.get('rate_template_cost_lines',root.id).version}]});assert.equal(s.all('rate_template_cost_lines').filter(l=>l.template_id===r.id).length,0);s.undoRateCosts({template_id:r.id,template_version:s.get('rate_templates',r.id).version});assert.equal(s.previewRate(r.id).result.cost_total,before.cost_total);assert.ok(s.all('rate_template_coverages').some(c=>c.template_id===r.id));});
